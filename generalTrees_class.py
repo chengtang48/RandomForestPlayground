@@ -7,6 +7,7 @@ from math import sqrt
 from math import floor
 import os
 import numpy as np
+import scipy
 import scipy.sparse as sps
 from sklearn import random_projection
 from tree_utilities import *
@@ -33,7 +34,7 @@ class flex_binary_trees(object):
                  proj_design={'name':'projmat','params':{'name':'breiman','sparsity':3,'target_dim':10}}, 
                  split_design={'name':'cart', 'params':{'regress':False}}, 
                  stop_design={'name':'naive'}, 
-                 height=0, labels=None, master_tree=None):
+                 height=0, labels=None, predict_type=None, master_tree=None):
         """
         data: n by d matrix, the entire dataset assigned to the tree
         data_indices: the subset of indices assigned to this node
@@ -53,6 +54,7 @@ class flex_binary_trees(object):
         self.proj_design = proj_design
         self.split_design = split_design 
         self.stop_design = stop_design
+        self.predict_type = predict_type
         
         self.height_ = height
         self.labels = labels
@@ -62,11 +64,14 @@ class flex_binary_trees(object):
             
             
         ## set stop rule: a boolean function
-        if np.sum(self.data_ind) == 0:
+        if not self.data_ind:
             ## stop if this cell has no data
             self.isLeaf = True
         elif self.stop_design['name'] == 'naive':
-            self.isLeaf = naive_stop_rule(self.data[self.data_ind,:], height=self.height_) 
+        	#print(data.shape)
+        	#print(len(self.data_ind))
+        	#print(self.data[self.data_ind])
+        	self.isLeaf = naive_stop_rule(self.data[self.data_ind], height=self.height_) 
             
         elif self.stop_design['name'] == 'cell_size':
             assert 'params' in self.stop_design, "Please specify stopping parameters!"
@@ -74,7 +79,7 @@ class flex_binary_trees(object):
             max_h = None
             if 'max_level' in self.stop_design['params']:
                 max_h = self.stop_design['params']['max_level']
-            self.isLeaf = cell_size_rule(self.data[self.data_ind,:], self.height_,
+            self.isLeaf = cell_size_rule(self.data[self.data_ind], self.height_,
                                          max_height=max_h, target_diameter=0.5*d0)
         else:
             print("You must provide a known stopping method!")
@@ -89,7 +94,7 @@ class flex_binary_trees(object):
         
         Warning: Should only be executed if self.data_ind has at least ONE nonzero element
         """
-        assert np.sum(self.data_ind) > 0, "The cell is empty!!"
+        assert self.data_ind is not None, "The cell is empty!!"
         name_list = ['projmat', 'cyclic', 'full']
         
         method = self.proj_design['name']
@@ -98,7 +103,7 @@ class flex_binary_trees(object):
         
         if method == 'projmat':
             
-            return comp_projmat(self.data[self.data_ind,:], **self.proj_design['params'])
+            return comp_projmat(self.data[self.data_ind], **self.proj_design['params'])
         
         elif method == 'cyclic':
             # cycle through features using height information
@@ -117,8 +122,8 @@ class flex_binary_trees(object):
         Returns the best split direction and threshold
         Warning: Should only be executed if self.data_ind has at least ONE nonzero element
         """
-        assert np.sum(self.data_ind) > 0, "The cell is empty!"
-        name_list = ['cart', 'median', 'median_perturb', '2means']
+        assert self.data_ind is not None, "The cell is empty!"
+        name_list = ['cart', 'median', 'median_perturb', 'median_spill', 'cluster_based']
         
         method = self.split_design['name']
         assert method in name_list, 'No such split rule implemented in current tree class!'
@@ -129,15 +134,18 @@ class flex_binary_trees(object):
             params = dict()
         
         if method == 'cart':
-            return cart_split(self.data[self.data_ind,:], A, self.labels[self.data_ind], **params)
+            return cart_split(self.data[self.data_ind], A, self.labels[self.data_ind], **params)
         elif method == 'median':
-            return median_split(self.data[self.data_ind,:], A, **params)
+            return median_split(self.data[self.data_ind], A, **params)
         elif method == 'median_perturb':
             
             node_height = self.height_ # height of this node relative to root of the flex tree
-            return median_perturb_split(self.data[self.data_ind,:], A, node_height, **params)
+            return median_perturb_split(self.data[self.data_ind], A, node_height, **params)
+        elif method == 'median_spill':
+            return median_spill_split(self.data[self.data_ind], A, **params)
         else:
-            return two_means_split(self.data[self.data_ind,:], A, **params)
+            ## method == 'cluster_based'
+            return cluster_based_split(self.data[self.data_ind], A, **params)
         
     
     def buildtree(self):
@@ -156,48 +164,59 @@ class flex_binary_trees(object):
             ## find the best split feature and the best threshold
             split_rule = self.split_design['name']
             _, self.w_, self.thres_ = self.split_rule_function(A)
+            #print('splitting threshold', self.thres_)
             
             ## transform data to get one or more candidate features
             if sps.issparse(self.w_):
-                projected_data = sps.csr_matrix.dot(self.data[self.data_ind, :], self.w_).squeeze()
+                projected_data = sps.csr_matrix.dot(self.data[self.data_ind], self.w_).squeeze()
             else:
-                projected_data = np.dot(self.data[self.data_ind, :], self.w_) ## project data to 1-D
+                projected_data = np.dot(self.data[self.data_ind], self.w_) ## project data to 1-D
             
-            data_indices = []
-            ## data_ind always has the same size as the number of data size
-            ## data_indices has the same size as the number of data in this cell
-            for i in range(len(self.data_ind)):
-                if self.data_ind[i] == 1:
-                    data_indices.append(i)
-            assert len(data_indices) == len(projected_data)
-            data_indices = np.array(data_indices)
+            old_data_indices = np.array(self.data_ind) ## data_indices has the same size as the number of data in this cell
+#             for i in range(len(self.data_ind)):
+#                 if self.data_ind[i] == 1:
+#                     data_indices.append(i)
+#             assert len(data_indices) == len(projected_data)
+#             data_indices = np.array(data_indices)
             
             ## split data into left and right
-            left_indices = projected_data < self.thres_
-            right_indices = projected_data >= self.thres_
+            #print('threshold is', self.thres_)
+            if isinstance(self.thres_, float):
+                left_indices = projected_data < self.thres_
+                right_indices = projected_data >= self.thres_
+            elif isinstance(self.thres_, np.ndarray):
+                left_indices = projected_data < self.thres_[1]
+                right_indices = projected_data > self.thres_[0]
+            else:
+                print('Err: soemthing is wrong with the splitting threshold')
+                exit(1)
             
             ## Here, it's still possible that one of the left or right indices is empty array
-            assert np.sum(left_indices)+np.sum(right_indices) == len(data_indices)
-            left_ind = data_indices[left_indices]
-            right_ind = data_indices[right_indices]
+            #display(left_indices)
+            #display(right_indices)
+            #display(data_indices)
+            left_ind = list(old_data_indices[left_indices])
+            right_ind = list(old_data_indices[right_indices])
+            # if self.split_design['name'] != 'median_spill':
+#             	assert len(left_ind)+len(right_ind) == len(self.data)
             ##
-            n_data = self.data.shape[0]
-            left = np.zeros(n_data, dtype=bool)
-            if list(left_ind):
-                # make assingment only if left_ind is non-empty
-                left[left_ind] = 1
-            right = np.zeros(n_data, dtype=bool)
-            if list(right_ind):
-                right[right_ind] = 1
+#             n_data = self.data.shape[0]
+#             left = np.zeros(n_data, dtype=bool)
+#             if list(left_ind):
+#                 # make assingment only if left_ind is non-empty
+#                 left[left_ind] = 1
+#             right = np.zeros(n_data, dtype=bool)
+#             if list(right_ind):
+#                 right[right_ind] = 1
             
             ## build subtrees on left and right partitions
             ## By our choice, empty cell will still make a node
-            self.leftChild_ = flex_binary_trees(self.data, left, self.proj_design, 
+            self.leftChild_ = flex_binary_trees(self.data, left_ind, self.proj_design, 
                                                     self.split_design, self.stop_design, 
                                                     self.height_+1, self.labels)
             self.leftChild_.buildtree()
             
-            self.rightChild_ = flex_binary_trees(self.data, right, self.proj_design, 
+            self.rightChild_ = flex_binary_trees(self.data, right_ind, self.proj_design, 
                                                      self.split_design, self.stop_design, 
                                                      self.height_+1, self.labels)
             self.rightChild_.buildtree()
@@ -206,15 +225,15 @@ class flex_binary_trees(object):
     def train(self):
         self.buildtree()
         
-    def predict_one(self, point, predict_type='class'):
-        return predict_one_bt(self, point, predict_type=predict_type)
+    def predict_one(self, point):
+        return predict_one_bt(self, point, predict_type=self.predict_type)
         
-    def predict(self, test, predict_type='class'):
-        return predict_bt(self, test, predict_type=predict_type)
+    def predict(self, test):
+        return predict_bt(self, test, predict_type=self.predict_type)
             
             
 ####-------- Utility functions for binary trees   
-
+	
 def retrievalLeaf(btree, query):
     """
     Given a binary partition tree
@@ -241,7 +260,9 @@ def retrievalSet(btree, query):
     ## base case: return data indices if leaf node is reached    
     if btree.leftChild_ is None and btree.rightChild_ is None:
         ## By our recursion, data_ind returned won't be all zeros
-        assert np.sum(btree.data_ind) != 0, "Something is wrong!"
+        assert btree.data_ind is not None, "Something is wrong!"
+        if btree.split_design['name']=='median_spill':
+        	return set(btree.data_ind)
         return btree.data_ind
         
     ## check which subset does the query belong to
@@ -250,16 +271,38 @@ def retrievalSet(btree, query):
     else:
         val = np.dot(btree.w_, query)
         
-    if val < btree.thres_: 
-        if (btree.leftChild_ is None) or (np.sum(btree.leftChild_.data_ind)==0):
-            # use parent cell as the retrieval set 
-            # parent cell is guaranteed to be non-empty
-            return btree.data_ind
-        return retrievalSet(btree.leftChild_, query)
+    if isinstance(btree.thres_, float):
+        if val < btree.thres_: 
+            if (btree.leftChild_ is None) or (btree.leftChild_.data_ind is None):
+                # use parent cell as the retrieval set 
+                # parent cell is guaranteed to be non-empty
+                return btree.data_ind
+            return retrievalSet(btree.leftChild_, query)
+        else:
+            if (btree.rightChild_ is None) or (btree.rightChild_.data_ind is None):
+                return btree.data_ind
+            return retrievalSet(btree.rightChild_, query)
+    elif isinstance(btree.thres_, np.ndarray):
+        S = set()
+        if val < btree.thres_[1]:
+            if (btree.leftChild_ is None) or (btree.leftChild_.data_ind is None):
+                # use parent cell as the retrieval set 
+                # parent cell is guaranteed to be non-empty
+                S |= set(btree.data_ind)
+            else: 
+                S |= retrievalSet(btree.leftChild_, query)
+        if val > btree.thres_[0]:
+            if (btree.rightChild_ is None) or (btree.rightChild_.data_ind is None):
+                # use parent cell as the retrieval set 
+                # parent cell is guaranteed to be non-empty
+                S |= set(btree.data_ind)
+            else: 
+                S |= retrievalSet(btree.rightChild_, query)
+        return S
+            
     else:
-        if (btree.rightChild_ is None) or (np.sum(btree.rightChild_.data_ind)==0):
-            return btree.data_ind
-        return retrievalSet(btree.rightChild_, query)
+        print('Err: soemthing is wrong with the splitting threshold')
+        exit(1)
         
 def getDepth(btree, depth):
     """
@@ -280,10 +323,14 @@ def getDepth(btree, depth):
         
 def predict_one_bt(btree, point, predict_type='class'):
     assert list(btree.labels), "This tree has no associated data labels!"
-    set_ind = retrievalSet(btree, point) 
+    set_ind = retrievalSet(btree, point)
+    ## get indicator vector if set_ind is hashed
+    #if isinstance(set_ind, set):
+    set_ind = list(set_ind)
+    #print('retrieved indices', set_ind)
     
     if predict_type == 'class':
-        if np.sum(set_ind)==0:
+        if not set_ind:
             # using retrievalSet makes sure set_ind is not all zeros
             # but this check is just in case
             return round(np.mean(btree.labels))
@@ -291,7 +338,7 @@ def predict_one_bt(btree, point, predict_type='class'):
         
     else:
         # regression
-        if np.sum(set_ind)==0:
+        if not set_ind:
             return np.mean(btree.labels)
         return np.mean(btree.labels[set_ind])
         
@@ -322,11 +369,7 @@ def printPartition(tree, level):
     Can be used for testing purposes
     """
     if tree.height_ == level or (tree.leftChild_ is None and tree.rightChild_ is None):
-        ind_set = []
-        for i in range(len(tree.data_ind)):
-            if tree.data_ind[i] == 1:
-                ind_set.append(i)
-        print(ind_set)
+        print(tree.data_ind)
     else:
         printPartition(tree.leftChild_, level)
         printPartition(tree.rightChild_, level)
@@ -345,10 +388,14 @@ def traverseLeaves(tree):
     if tree.rightChild_ is not None:
         for t in traverseLeaves(tree.rightChild_):
             yield t
+        
             
 #######------- A class of master trees inspired by Kpotufe's adaptive tree structure
 ## these are not binary trees but are "meta-trees" built on binary trees
 ## it is used to prune a binary tree as on-the-fly
+"""
+Currently the index issues for master trees are not fixed: TBD
+"""
 
 class master_trees(object):
     

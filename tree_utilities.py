@@ -7,6 +7,7 @@ from math import sqrt
 from math import floor
 import os
 import numpy as np
+import scipy
 import scipy.sparse as sps
 from sklearn import random_projection
 #from pandas import DataFrame
@@ -101,7 +102,10 @@ def cart_split(data, proj_mat, labels=None, regress=False):
     else:
         data_trans = np.dot(data, proj_mat) # n-by-d
 
-    score, ind, thres = -999, None, None
+    #score, ind, thres = -999, None, None
+    score = -999 
+    ind = None 
+    thres = None
     if data_trans.ndim == 1:
         if not regress:
             #classification
@@ -129,7 +133,9 @@ def cart_split(data, proj_mat, labels=None, regress=False):
 
 def cscore(data_1D, labels):
     ## cart classification criterion
-    score, thres = -999, None
+    #score, thres = -999, None
+    score = -999
+    thres = None
     if not list(labels):
         return score, thres
     n = len(labels)
@@ -154,7 +160,9 @@ def cscore(data_1D, labels):
 
 def rscore(data_1D, labels):
     ## cart regression criterion
-    score, thres = -999, None
+    #score, thres = -999, None
+    score = -999
+    thres = None
     if not list(labels):
         return score, thres
     n = len(labels)
@@ -179,6 +187,29 @@ def rscore(data_1D, labels):
     return score, thres
 
 ##### median splits
+def median_spill_split(data, proj_mat, spill=0.15, labels=None):
+    if sps.issparse(proj_mat):
+        #data_transformed = sps.csr_matrix.dot(data, proj_mat).squeeze()
+        data_trans = proj_mat.T.dot(data.T).T.squeeze()
+    elif proj_mat is None:
+        data_trans = data
+    else:
+        data_trans = np.dot(data, proj_mat) # n-by-d
+    if data_trans.ndim > 1:
+        score = 0
+        ind = 0
+        for i in range(proj_mat.shape[1]):
+            score_new = spread_1D(data_trans[:,i])
+            if score_new > score:
+                score = score_new 
+                ind = i
+        w = proj_mat[:, ind]
+        thres = scipy.stats.mstats.mquantiles(data_trans[:, ind], [0.5 - spill/2, 0.5 + spill/2])
+    else:
+        thres = scipy.stats.mstats.mquantiles(data_trans, [0.5 - spill/2, 0.5 + spill/2])
+        w = proj_mat
+        score = spread_1D(data_trans)
+    return score, w, thres
 
 def median_split(data, proj_mat, labels=None):
     if sps.issparse(proj_mat):
@@ -187,11 +218,13 @@ def median_split(data, proj_mat, labels=None):
     else:
         data_trans = np.dot(data, proj_mat) # n-by-d
     if data_trans.ndim > 1:
-        score, ind = 0, 0
+        score = 0
+        ind = 0
         for i in range(proj_mat.shape[1]):
             score_new = spread_1D(data_trans[:,i])
             if score_new > score:
-                score, ind = score_new, i
+                score = score_new 
+                ind = i
         w = proj_mat[:, ind]
         thres = np.median(data_trans[:,ind])
     else:
@@ -243,7 +276,7 @@ def two_means_split(data, proj_mat, labels=None):
 def naive_stop_rule(data, height=None):
     if data.shape[0] <= 1:
         return True
-    if height > 8:
+    if height > 20:
         ## DO NOT ever make it exceed 15!!!
         return True
     

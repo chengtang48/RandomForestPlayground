@@ -18,7 +18,7 @@ from generalTrees_class import *
 
 class forest(object):
     def __init__(self, data, labels=None, tree_design=None, predictor_type='class',
-                  n_trees=10, n_samples=100, n_features=None):
+                  n_trees=10, n_samples=None, n_features=None):
         """
         tree_design: A dictionary containing 
           - tree: specifies type of the tree; flex or master
@@ -54,7 +54,9 @@ class forest(object):
         for i in range(self.n_trees):
             # sample data points with replacement
             # note numpy indexing supports repetitive/duplicate indexing
-            data_ind = np.random.choice(self.data.shape[0], self.n_samples, replace=True)
+            data_ind = range(len(self.data))
+            if self.n_samples:
+            	data_ind = np.random.choice(self.data.shape[0], self.n_samples, replace=True)
             data_tree = self.data[data_ind,:] # data unique to this tree
             
             if self.n_features is not None:
@@ -71,7 +73,7 @@ class forest(object):
                 proj_design, split_design, stop_design = self.tree_design['proj_design'],\
                    self.tree_design['split_design'],self.tree_design['stop_design']
                     
-                f_tree = flex_binary_trees(data_tree, np.ones(data_tree.shape[0], dtype=bool), 
+                f_tree = flex_binary_trees(data_tree, range(data_tree.shape[0]), 
                                         proj_design,split_design, stop_design, labels=labels_tree)
                 f_tree.buildtree()
                 self.trees.append(f_tree)
@@ -115,7 +117,7 @@ class forest(object):
             ## binary classification
             avg_predict = 0
             for tree in self.trees:
-                avg_predict += tree.predict_one(point, predict_type='class')
+                avg_predict += predict_one_bt(tree, point, predict_type='class')
             if avg_predict/float(len(self.trees)) > 0.5:
                 return 1
             else:
@@ -124,10 +126,11 @@ class forest(object):
             ## regression
             avg_predict = 0
             for tree in self.trees:
-                avg_predict += tree.predict_one(point, predict_type='regress')
+                avg_predict += predict_one_bt(tree, point, predict_type='regress')
             return avg_predict/float(len(self.trees))
         else:
             print("Unrecognized prediction method!")
+            eixt(1)
            
     def predict(self, test):
         predictions = list()

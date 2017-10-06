@@ -56,7 +56,7 @@ class forest(object):
             # sample data points with replacement
             # note numpy indexing supports repetitive/duplicate indexing
             data_ind = range(len(self.data))
-            if self.n_samples:
+            if self.n_samples and self.n_samples < self.data.shape[0]:
             	data_ind = np.random.choice(self.data.shape[0], self.n_samples, replace=True)
             data_tree = self.data[data_ind,:] # data unique to this tree
             

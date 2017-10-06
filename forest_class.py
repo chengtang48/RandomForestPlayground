@@ -50,7 +50,8 @@ class forest(object):
         if isPredict:
             assert self.labels is not None, "Data labels missing!"
         tree_type = self.tree_design['tree']
-        
+        ## override existing trees
+        self.trees = list()
         for i in range(self.n_trees):
             # sample data points with replacement
             # note numpy indexing supports repetitive/duplicate indexing
